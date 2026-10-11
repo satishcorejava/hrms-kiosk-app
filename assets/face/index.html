@@ -1,0 +1,178 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, maximum-scale=1, user-scalable=no">
+<title>Face check</title>
+<!--
+  The face check, run inside the app's WebView so it uses the same face engine (face-api.js) as the
+  HRMS web portal: a face set up in the portal is recognised here. Live-person check: look straight,
+  turn the head to one side, look straight again. The result goes to the app through the
+  "captured" handler, which answers {ok:true} or {error:"..."}.
+-->
+<style>
+  :root { --accent: #2e7dff; --warn: #ffb020; --bad: #ff5a5a; --good: #2ecc71; }
+  html, body { margin: 0; height: 100%; background: #0e1116; color: #fff; font-family: system-ui, -apple-system, Roboto, sans-serif; overflow: hidden; }
+  #wrap { position: relative; width: 100%; height: 100%; }
+  video { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: cover; transform: scaleX(-1); }
+  #oval { position: absolute; left: 50%; top: 46%; width: min(62vw, 46vh); height: min(80vw, 60vh); transform: translate(-50%, -50%);
+          border-radius: 50%; border: 5px solid var(--accent); box-shadow: 0 0 0 9999px rgba(0,0,0,.45); transition: border-color .2s; }
+  #panel { position: absolute; left: 0; right: 0; bottom: 0; padding: 18px 20px 24px; text-align: center;
+           background: linear-gradient(transparent, rgba(0,0,0,.75) 35%); }
+  #prompt { font-size: clamp(20px, 4.4vw, 30px); font-weight: 800; }
+  #hint { margin-top: 6px; font-size: clamp(14px, 3.2vw, 18px); color: var(--warn); min-height: 1.2em; }
+  #error { display: none; margin-top: 8px; font-size: clamp(15px, 3.4vw, 19px); color: #ffd6d6; }
+  button { display: none; margin: 14px auto 0; padding: 14px 28px; font-size: 18px; font-weight: 700; color: #fff; background: var(--accent);
+           border: 0; border-radius: 14px; }
+  #spinner { position: absolute; left: 50%; top: 46%; width: 54px; height: 54px; margin: -27px 0 0 -27px; border-radius: 50%;
+             border: 5px solid rgba(255,255,255,.25); border-top-color: #fff; animation: spin 1s linear infinite; }
+  @keyframes spin { to { transform: rotate(360deg); } }
+</style>
+</head>
+<body>
+<div id="wrap">
+  <video id="video" muted playsinline></video>
+  <div id="oval"></div>
+  <div id="spinner"></div>
+  <div id="panel">
+    <div id="prompt">Starting the camera…</div>
+    <div id="hint"></div>
+    <div id="error"></div>
+    <button id="retry">Try again</button>
+  </div>
+</div>
+<script src="face-api.js"></script>
+<script>
+(function () {
+  const params = new URLSearchParams(location.search);
+  const MODE = params.get('mode') === 'enroll' ? 'enroll' : 'verify';
+  const FRONTAL = (y) => y > 0.4 && y < 0.6;
+  const TURNED = (y) => y < 0.3 || y > 0.7;
+  const MIN_SIZE = 0.2;
+
+  const video = document.getElementById('video');
+  const oval = document.getElementById('oval');
+  const spinner = document.getElementById('spinner');
+  const promptEl = document.getElementById('prompt');
+  const hintEl = document.getElementById('hint');
+  const errorEl = document.getElementById('error');
+  const retry = document.getElementById('retry');
+
+  let step = 'starting', captures = [], lastCapture = 0, started = 0, timer = null, stream = null, modelsReady = null;
+
+  const PROMPT = {
+    starting: 'Starting the camera…', center: 'Look straight at the camera', turn: 'Now turn your head slowly to one side',
+    back: 'And look straight again', checking: 'Checking…', done: 'Done',
+  };
+
+  function show(s) {
+    step = s;
+    promptEl.textContent = PROMPT[s] || '';
+    spinner.style.display = (s === 'starting' || s === 'checking') ? 'block' : 'none';
+    oval.style.borderColor = s === 'done' ? 'var(--good)' : 'var(--accent)';
+  }
+
+  function fail(message) {
+    step = 'failed';
+    spinner.style.display = 'none';
+    promptEl.textContent = '';
+    hintEl.textContent = '';
+    errorEl.textContent = message;
+    errorEl.style.display = 'block';
+    retry.style.display = 'block';
+    oval.style.borderColor = 'var(--bad)';
+  }
+
+  function app(name, payload) {
+    if (window.flutter_inappwebview && window.flutter_inappwebview.callHandler) return window.flutter_inappwebview.callHandler(name, payload);
+    return Promise.resolve({ error: 'Not running in the app' });
+  }
+
+  function loadModels() {
+    if (!modelsReady) {
+      modelsReady = Promise.all([
+        faceapi.nets.tinyFaceDetector.loadFromUri('models'),
+        faceapi.nets.faceLandmark68Net.loadFromUri('models'),
+        faceapi.nets.faceRecognitionNet.loadFromUri('models'),
+      ]).catch((e) => { modelsReady = null; throw e; });
+    }
+    return modelsReady;
+  }
+
+  function snapshot() {
+    const c = document.createElement('canvas');
+    c.width = 360;
+    c.height = Math.round(video.videoHeight / video.videoWidth * 360);
+    c.getContext('2d').drawImage(video, 0, 0, c.width, c.height);
+    return c.toDataURL('image/jpeg', 0.75);
+  }
+
+  async function read() {
+    const found = await faceapi.detectAllFaces(video, new faceapi.TinyFaceDetectorOptions({ inputSize: 320, scoreThreshold: 0.5 }))
+      .withFaceLandmarks().withFaceDescriptors();
+    if (found.length !== 1) return { faces: found.length };
+    const f = found[0], p = f.landmarks.positions;
+    return {
+      faces: 1, descriptor: Array.from(f.descriptor),
+      yaw: (p[30].x - p[36].x) / (p[45].x - p[36].x), size: f.detection.box.width / video.videoWidth,
+    };
+  }
+
+  async function tick() {
+    if (step === 'failed' || step === 'checking' || step === 'done') return;
+    let r;
+    try { r = await read(); } catch (e) { timer = setTimeout(tick, 200); return; }
+    if (r.faces === 0) hintEl.textContent = 'No face in view';
+    else if (r.faces > 1) hintEl.textContent = 'Only one person in front of the camera, please';
+    else if (r.size < MIN_SIZE) hintEl.textContent = 'Come a little closer';
+    else {
+      hintEl.textContent = Date.now() - started > 25000 ? 'Having trouble? Face a light, and take off a cap or mask.' : '';
+      if (step === 'center' && FRONTAL(r.yaw)) {
+        if (MODE === 'enroll' && Date.now() - lastCapture > 350) { captures.push(r.descriptor); lastCapture = Date.now(); }
+        if (MODE === 'verify' || captures.length >= 3) show('turn');
+      } else if (step === 'turn' && TURNED(r.yaw)) {
+        show('back');
+      } else if (step === 'back' && FRONTAL(r.yaw)) {
+        const payload = { descriptor: r.descriptor, descriptors: MODE === 'enroll' ? captures : [r.descriptor], photo: snapshot() };
+        show('checking');
+        let answer;
+        try { answer = await app('captured', payload); } catch (e) { answer = { error: 'Something went wrong; try again' }; }
+        if (answer && answer.ok) show('done');
+        else fail((answer && answer.error) || 'Something went wrong; try again');
+        return;
+      }
+    }
+    timer = setTimeout(tick, 120);
+  }
+
+  async function start() {
+    clearTimeout(timer);
+    captures = []; lastCapture = 0;
+    errorEl.style.display = 'none'; retry.style.display = 'none'; hintEl.textContent = '';
+    show('starting');
+    try {
+      if (!stream) {
+        stream = await navigator.mediaDevices.getUserMedia({ video: { facingMode: 'user', width: { ideal: 640 }, height: { ideal: 480 } }, audio: false });
+        video.srcObject = stream;
+        await video.play();
+      }
+      await loadModels();
+      started = Date.now();
+      show('center');
+      tick();
+    } catch (e) {
+      const name = e && e.name;
+      fail(name === 'NotAllowedError' ? 'The app needs the camera. Allow it in Settings → Apps → HRMS Kiosk → Permissions.'
+        : name === 'NotFoundError' ? 'No front camera found on this device.' : ('Couldn\'t start the camera: ' + (e && e.message || e)));
+    }
+  }
+
+  retry.addEventListener('click', start);
+  // The app calls this to scan again for the next person.
+  window.restartScan = start;
+  window.stopCamera = function () { clearTimeout(timer); if (stream) stream.getTracks().forEach((t) => t.stop()); stream = null; };
+  start();
+})();
+</script>
+</body>
+</html>
