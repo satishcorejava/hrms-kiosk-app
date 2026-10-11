@@ -125,9 +125,9 @@ class KioskApi {
     return u;
   }
 
-  Future<Map<String, dynamic>?> _call(String method, String path, [Object? body]) async {
+  Future<Map<String, dynamic>?> _call(String method, String path, [Object? body, String? tenant]) async {
     final uri = Uri.parse('$baseUrl$path');
-    final headers = {'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Device-Token': ?token};
+    final headers = {'Content-Type': 'application/json', 'Accept': 'application/json', 'X-Device-Token': ?token, 'X-Tenant': ?tenant};
     http.Response res;
     try {
       final f = method == 'GET' ? http.get(uri, headers: headers) : http.post(uri, headers: headers, body: jsonEncode(body ?? {}));
@@ -151,8 +151,10 @@ class KioskApi {
     throw ApiException(message, status: res.statusCode);
   }
 
-  Future<({String token, DeviceConfig device})> pair(String code, String deviceInfo) async {
-    final d = await _call('POST', '/device/pair', {'code': code, 'deviceInfo': deviceInfo});
+  /// [company] is the company code from Time Clock → Devices when HRMS serves several companies;
+  /// the key that comes back carries it, so later calls need nothing more.
+  Future<({String token, DeviceConfig device})> pair(String code, String deviceInfo, {String? company}) async {
+    final d = await _call('POST', '/device/pair', {'code': code, 'deviceInfo': deviceInfo}, company);
     return (token: d!['token'] as String, device: DeviceConfig.fromJson(d['device'] as Map<String, dynamic>));
   }
 

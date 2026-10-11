@@ -21,6 +21,7 @@ class PairScreen extends StatefulWidget {
 class _PairScreenState extends State<PairScreen> {
   late final _server = TextEditingController(text: widget.server ?? DeviceStore.defaultServer);
   final _code = TextEditingController();
+  final _company = TextEditingController();
   bool _busy = false;
   String? _error;
 
@@ -42,7 +43,8 @@ class _PairScreenState extends State<PairScreen> {
     setState(() { _busy = true; _error = null; });
     try {
       final server = _server.text.trim();
-      final paired = await KioskApi(server).pair(code, await _deviceInfo());
+      final company = _company.text.trim().toLowerCase();
+      final paired = await KioskApi(server).pair(code, await _deviceInfo(), company: company.isEmpty ? null : company);
       await DeviceStore.save(server, paired.token);
       widget.onPaired(KioskApi(server, token: paired.token), paired.device);
     } on ApiException catch (e) {
@@ -89,6 +91,16 @@ class _PairScreenState extends State<PairScreen> {
                   inputFormatters: [FilteringTextInputFormatter.allow(RegExp(r'[A-Za-z0-9-]')), _UpperCase()],
                   decoration: const InputDecoration(labelText: 'Pairing code', hintText: 'ABCD-2345', counterText: '', border: OutlineInputBorder()),
                   onSubmitted: (_) => _pair(),
+                ),
+                const SizedBox(height: 16),
+                TextField(
+                  controller: _company,
+                  autocorrect: false,
+                  decoration: const InputDecoration(
+                    labelText: 'Company code (if shown)',
+                    helperText: 'Shown with the pairing code when your HRMS serves several companies',
+                    border: OutlineInputBorder(),
+                  ),
                 ),
                 const SizedBox(height: 16),
                 TextField(
