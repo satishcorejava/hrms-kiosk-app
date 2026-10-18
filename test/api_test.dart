@@ -29,4 +29,36 @@ void main() {
     expect(t.punches.single.time.hour, 9);
     expect(t.faceRequired, isTrue);
   });
+
+  test('a break in progress is read with its start and the allowance', () {
+    final t = Today.fromJson({
+      'employeeId': 7,
+      'employeeName': 'Asha Rao',
+      'punches': [
+        {'time': '2026-10-12T09:00:00', 'type': 'IN', 'source': 'KIOSK'},
+        {'time': '2026-10-12T13:00:00', 'type': 'BREAK_START', 'source': 'KIOSK'},
+      ],
+      'lateMinutes': 0,
+      'onBreak': true,
+      'nextActions': ['BREAK_END', 'OUT'],
+      'monthLocked': false,
+      'faceRequired': false,
+      'breakMinutes': 52,
+      'breakAllowedMinutes': 45,
+      'breakStartedAt': '2026-10-12T13:00:00',
+    });
+    expect(t.onBreak, isTrue);
+    expect(t.breakMinutes, 52);
+    expect(t.breakAllowedMinutes, 45);
+    expect(t.breakStartedAt, DateTime(2026, 10, 12, 13));
+  });
+
+  test('a day from an older server, without break details, still reads', () {
+    final t = Today.fromJson({
+      'employeeId': 7, 'employeeName': 'Asha Rao', 'punches': [], 'lateMinutes': 0, 'onBreak': false,
+      'nextActions': ['IN'], 'monthLocked': false, 'faceRequired': false,
+    });
+    expect(t.breakAllowedMinutes, 0);
+    expect(t.breakStartedAt, isNull);
+  });
 }

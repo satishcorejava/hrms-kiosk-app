@@ -64,6 +64,9 @@ class Today {
     required this.nextActions,
     required this.monthLocked,
     required this.faceRequired,
+    this.breakMinutes = 0,
+    this.breakAllowedMinutes = 0,
+    this.breakStartedAt,
   });
 
   final int employeeId;
@@ -79,6 +82,11 @@ class Today {
   final List<String> nextActions;
   final bool monthLocked;
   final bool faceRequired;
+  /// Break taken so far today, and the shift's allowance (0: none).
+  final int breakMinutes;
+  final int breakAllowedMinutes;
+  /// When the break they're on started.
+  final DateTime? breakStartedAt;
 
   String get firstName => employeeName.split(' ').first;
 
@@ -98,6 +106,9 @@ class Today {
       nextActions: ((j['nextActions'] as List?) ?? []).cast<String>(),
       monthLocked: j['monthLocked'] == true,
       faceRequired: j['faceRequired'] == true,
+      breakMinutes: ((j['breakMinutes'] as num?) ?? 0).toInt(),
+      breakAllowedMinutes: ((j['breakAllowedMinutes'] as num?) ?? 0).toInt(),
+      breakStartedAt: j['breakStartedAt'] == null ? null : DateTime.parse(j['breakStartedAt'] as String),
     );
   }
 }
@@ -165,11 +176,18 @@ class KioskApi {
 
   Future<Today> identifyByFace(FaceEvidence face) async => Today.fromJson((await _call('POST', '/device/identify/face', face.toJson()))!);
 
-  Future<Today> punchByPin(String employeeCode, String pin, String type, {FaceEvidence? face}) async => Today.fromJson(
-      (await _call('POST', '/device/punch/pin', {'employeeCode': employeeCode, 'pin': pin, 'type': type, ...?face?.toJson()}))!);
+  /// [breakEndedAt]: punching out while still on a break, when they got back ("yyyy-MM-ddTHH:mm", India time).
+  Future<Today> punchByPin(String employeeCode, String pin, String type, {FaceEvidence? face, String? breakEndedAt}) async => Today.fromJson(
+      (await _call('POST', '/device/punch/pin', {
+        'employeeCode': employeeCode, 'pin': pin, 'type': type, ...?face?.toJson(),
+        'breakEndedAt': ?breakEndedAt,
+      }))!);
 
-  Future<Today> punchByFace(int employeeId, String type, FaceEvidence face) async =>
-      Today.fromJson((await _call('POST', '/device/punch/face', {'employeeId': employeeId, 'type': type, ...face.toJson()}))!);
+  Future<Today> punchByFace(int employeeId, String type, FaceEvidence face, {String? breakEndedAt}) async =>
+      Today.fromJson((await _call('POST', '/device/punch/face', {
+        'employeeId': employeeId, 'type': type, ...face.toJson(),
+        'breakEndedAt': ?breakEndedAt,
+      }))!);
 
   Future<void> checkExitPin(String pin) async => _call('POST', '/device/exit', {'pin': pin});
 }

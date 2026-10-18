@@ -19,6 +19,14 @@ String _time(DateTime t) {
   return '$h:${t.minute.toString().padLeft(2, '0')} ${t.hour < 12 ? 'AM' : 'PM'}';
 }
 
+String _two(int n) => n.toString().padLeft(2, '0');
+
+/// India wall-clock time as the server takes it: "yyyy-MM-ddTHH:mm".
+String _stamp(DateTime t) => '${t.year}-${_two(t.month)}-${_two(t.day)}T${_two(t.hour)}:${_two(t.minute)}';
+
+/// The same wall-clock fields, whatever zone flag the DateTime carries.
+DateTime _wall(DateTime t) => DateTime(t.year, t.month, t.day, t.hour, t.minute);
+
 String _hhmm(String? hms) {
   if (hms == null) return '';
   final p = hms.split(':');
@@ -49,6 +57,8 @@ class _KioskScreenState extends State<KioskScreen> {
   String _code = '';
   String _pin = '';
   String? _pendingType;
+  /// Punching out from a break: when they got back (asked before the punch).
+  String? _pendingBackAt;
   String? _message;
   String? _error;
   bool _busy = false;
@@ -164,8 +174,80 @@ class _KioskScreenState extends State<KioskScreen> {
     }
   }
 
+  /// "When did you get back?" for someone punching out while still on a break. Null: cancelled.
+  Future<String?> _askBackFromBreak(DateTime startedAt) async {
+    _idle?.cancel();
+    final started = _wall(startedAt);
+    final now = _wall(_now);
+    final since = now.difference(started).inMinutes;
+    final options = <String, DateTime>{
+      'Just now': now,
+      for (final m in [5, 15, 30])
+        if (now.subtract(Duration(minutes: m)).isAfter(started)) '$m min ago (${_time(now.subtract(Duration(minutes: m)))})': now.subtract(Duration(minutes: m)),
+    };
+    final picked = await showModalBottomSheet<String>(
+      context: context,
+      isScrollControlled: true,
+      showDragHandle: true,
+      builder: (ctx) {
+        final theme = Theme.of(ctx);
+        return SafeArea(
+          child: Padding(
+            padding: const EdgeInsets.fromLTRB(24, 0, 24, 24),
+            child: Column(mainAxisSize: MainAxisSize.min, crossAxisAlignment: CrossAxisAlignment.stretch, children: [
+              Text('You\'re still on break', style: theme.textTheme.headlineSmall?.copyWith(fontWeight: FontWeight.w800)),
+              const SizedBox(height: 6),
+              Text('Your break started at ${_time(started)} ($since min ago). When did you get back? Only that time counts as break.',
+                  style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
+              const SizedBox(height: 20),
+              for (final e in options.entries)
+                Padding(
+                  padding: const EdgeInsets.only(bottom: 12),
+                  child: SizedBox(
+                    height: 64,
+                    child: (e.key == 'Just now' ? FilledButton.new : FilledButton.tonal)(
+                      onPressed: () => Navigator.pop(ctx, _stamp(e.value)),
+                      child: Text(e.key == 'Just now' ? 'Just now: leaving straight from my break' : 'Back ${e.key}',
+                          style: const TextStyle(fontSize: 20, fontWeight: FontWeight.w700)),
+                    ),
+                  ),
+                ),
+              SizedBox(
+                height: 56,
+                child: OutlinedButton.icon(
+                  icon: const Icon(Icons.schedule),
+                  label: const Text('Pick the time', style: TextStyle(fontSize: 18)),
+                  onPressed: () async {
+                    final t = await showTimePicker(context: ctx, initialTime: TimeOfDay.fromDateTime(now));
+                    if (t == null || !ctx.mounted) return;
+                    var at = DateTime(started.year, started.month, started.day, t.hour, t.minute);
+                    if (at.isBefore(started)) at = at.add(const Duration(days: 1)); // a night shift's break past midnight
+                    if (at.isBefore(started) || at.isAfter(now)) {
+                      ScaffoldMessenger.of(ctx).showSnackBar(SnackBar(content: Text('Pick a time between ${_time(started)} and now')));
+                      return;
+                    }
+                    Navigator.pop(ctx, _stamp(at));
+                  },
+                ),
+              ),
+              TextButton(onPressed: () => Navigator.pop(ctx), child: const Text('Cancel', style: TextStyle(fontSize: 16))),
+            ]),
+          ),
+        );
+      },
+    );
+    _armIdle();
+    return picked;
+  }
+
   Future<void> _punch(String type) async {
     final who = _who!;
+    _pendingBackAt = null;
+    if (type == 'OUT' && who.onBreak && who.breakStartedAt != null) {
+      final back = await _askBackFromBreak(who.breakStartedAt!);
+      if (back == null || !mounted) return;
+      _pendingBackAt = back;
+    }
     // A PIN user who needs a face check looks at the camera first.
     if (_face == null && who.faceRequired) {
       _pendingType = type;
@@ -175,8 +257,8 @@ class _KioskScreenState extends State<KioskScreen> {
     setState(() { _busy = true; _error = null; });
     try {
       final t = _face != null
-          ? await widget.api.punchByFace(who.employeeId, type, _face!)
-          : await widget.api.punchByPin(_code, _pin, type);
+          ? await widget.api.punchByFace(who.employeeId, type, _face!, breakEndedAt: _pendingBackAt)
+          : await widget.api.punchByPin(_code, _pin, type, breakEndedAt: _pendingBackAt);
       _done(t, type);
     } on UnpairedException catch (e) {
       widget.onUnpaired(e.message);
@@ -190,7 +272,7 @@ class _KioskScreenState extends State<KioskScreen> {
 
   Future<String?> _punchByPinWithFace(FaceEvidence face) async {
     try {
-      final t = await widget.api.punchByPin(_code, _pin, _pendingType!, face: face);
+      final t = await widget.api.punchByPin(_code, _pin, _pendingType!, face: face, breakEndedAt: _pendingBackAt);
       _done(t, _pendingType!);
       return null;
     } on UnpairedException catch (e) {
@@ -455,12 +537,20 @@ class _Person extends StatelessWidget {
   Widget build(BuildContext context) {
     final theme = Theme.of(context);
     final firstIn = who.punches.where((p) => p.type == 'IN').firstOrNull;
-    final out = who.punches.where((p) => p.type == 'OUT').firstOrNull;
+    final lastInOut = who.punches.where((p) => p.type == 'IN' || p.type == 'OUT').lastOrNull;
+    final out = lastInOut?.type == 'OUT' ? lastInOut : null;
+    final allowed = who.breakAllowedMinutes;
+    final onBreakFor = who.onBreak && who.breakStartedAt != null
+        ? _wall(DateTime.now()).difference(_wall(who.breakStartedAt!)).inMinutes.clamp(0, 24 * 60)
+        : 0;
     final lines = <String>[
       if (who.shiftName != null) '${who.shiftName}: ${_hhmm(who.shiftStart)} – ${_hhmm(who.shiftEnd)}',
       if (firstIn != null) 'In at ${_time(firstIn.time)}${who.lateMinutes > 0 ? ' · late by ${who.lateMinutes} min' : ''}',
       if (out != null) 'Out at ${_time(out.time)}',
-      if (who.onBreak) 'On break',
+      if (who.onBreak && who.breakStartedAt != null)
+        'On break since ${_time(who.breakStartedAt!)} · $onBreakFor min${allowed > 0 ? ' (${who.breakMinutes} of $allowed min used today)' : ''}'
+      else if (who.onBreak)
+        'On break',
     ];
     Color colorFor(String a) => a == 'IN' ? Colors.green.shade700 : a == 'OUT' ? theme.colorScheme.error : theme.colorScheme.primary;
 
@@ -473,10 +563,15 @@ class _Person extends StatelessWidget {
             const SizedBox(height: 4),
             for (final l in lines) Text(l, style: theme.textTheme.titleMedium?.copyWith(color: theme.colorScheme.onSurfaceVariant)),
             const SizedBox(height: 24),
+            if (allowed > 0 && who.breakMinutes > allowed) ...[
+              _ErrorText('${who.breakMinutes - allowed} min over the $allowed min break allowed'),
+              const SizedBox(height: 12),
+            ],
             if (who.monthLocked)
               const _Notice('This month is locked for payroll. See your manager.')
             else if (who.nextActions.isEmpty)
               const _Notice('You\'ve punched out for this shift. See you next time!')
+
             else
               for (final a in who.nextActions)
                 Padding(
