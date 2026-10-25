@@ -7,10 +7,25 @@ class DeviceStore {
   static const _token = 'token';
   static const _lock = 'kiosk_lock';
 
-  static const defaultServer = 'https://hrms-backend-production-9ce1.up.railway.app';
+  /// The CCKart gateway's HRMS route (api.cckart.com/hrms/api/x -> hrms-backend /api/x).
+  static const defaultServer = 'https://api.cckart.com/hrms';
 
-  static Future<({String? server, String? token})> read() async =>
-      (server: await _storage.read(key: _server), token: await _storage.read(key: _token));
+  /// Addresses that no longer answer. A kiosk paired with one moves to [defaultServer], the same
+  /// HRMS backend, so its device key keeps working and nobody has to pair it again.
+  static const retiredServers = ['hrms-backend-production-9ce1.up.railway.app'];
+
+  /// [server], or [defaultServer] if it points at a retired address.
+  static String current(String server) {
+    final host = Uri.tryParse(server.trim())?.host.toLowerCase() ?? '';
+    return retiredServers.contains(host) ? defaultServer : server;
+  }
+
+  static Future<({String? server, String? token})> read() async {
+    final saved = await _storage.read(key: _server);
+    final server = saved == null ? null : current(saved);
+    if (server != null && server != saved) await _storage.write(key: _server, value: server);
+    return (server: server, token: await _storage.read(key: _token));
+  }
 
   static Future<void> save(String server, String token) async {
     await _storage.write(key: _server, value: server);
